@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html lang="zh-HK"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>坐標配對圖片</title>
+<style>
+*{box-sizing:border-box}html,body{margin:0;height:100%;background:#111;color:#eee;font-family:system-ui,sans-serif}
+#app{display:flex;flex-direction:column;height:100%;padding-top:env(safe-area-inset-top)}
+#map{flex:1;min-height:0}
+#info{padding:6px 10px;font-size:13px;background:#1c1c1c;line-height:1.4}
+.bar{display:flex;gap:8px;padding:8px 8px calc(8px + env(safe-area-inset-bottom));background:#1c1c1c}
+button,.up{flex:1;padding:12px 6px;border:0;border-radius:10px;background:#2d6cdf;color:#fff;font-size:16px;text-align:center}
+button.g{background:#2e8b57}button.r{background:#b23a3a}button.s{background:#444}
+.ov{position:fixed;inset:0;background:#111;display:flex;flex-direction:column;z-index:5;padding-top:env(safe-area-inset-top)}
+.hid{display:none!important}
+#form{flex:1;overflow:auto;padding:8px}
+.row{background:#1c1c1c;border-radius:10px;padding:8px;margin-bottom:8px;display:grid;grid-template-columns:1fr 1fr;gap:6px}
+.row b{grid-column:1/3}.row input[type=text]{width:100%;padding:9px;border-radius:8px;border:1px solid #444;background:#000;color:#fff;font-size:15px}
+.row .c{grid-column:1/3}.row img{width:100%;max-height:120px;object-fit:contain;grid-column:1/3}
+.row img:not([src]),.row img[src=""]{display:none}
+.row .up{padding:9px;background:#444;font-size:14px}.row button{padding:9px;font-size:14px}
+#no{width:100%;padding:10px;font-size:18px;border-radius:8px;border:1px solid #444;background:#000;color:#fff}
+#chips{display:flex;flex-wrap:wrap;gap:6px;margin:8px 0}
+#chips span{background:#333;padding:6px 10px;border-radius:14px;font-size:14px}
+#run{background:#000}#dist{position:absolute;left:8px;top:calc(8px + env(safe-area-inset-top));z-index:3;background:#000a;padding:6px 10px;border-radius:8px;font-size:16px;color:#ff0}
+#slots{flex:1;display:flex;flex-direction:column;min-height:0}
+.slot{flex:1;min-height:0;position:relative;border-bottom:1px solid #333;display:flex;align-items:center;justify-content:center}
+.slot img{max-width:100%;max-height:100%;object-fit:contain}
+.tag{position:absolute;right:8px;top:8px;background:#000a;color:#fff;padding:4px 10px;border-radius:8px;font-size:18px;font-weight:700}
+#xx{font-size:90px;color:#888}
+#keybox{padding:20px}#keybox input{width:100%;padding:10px;margin:10px 0;font-size:16px}
+</style></head><body>
+<div id="app">
+ <div id="map"></div>
+ <div id="info">定位中…</div>
+ <div class="bar" id="bar"><button class="g" id="bStart">開始</button><button id="bMap">地圖</button><button id="bIn">輸入</button></div>
+ <div class="bar hid" id="barMap"><button class="s" id="bBack">返回</button></div>
+</div>
+
+<div id="inp" class="ov hid">
+ <div id="form"></div>
+ <div class="bar"><button id="bNext">下一組</button><button class="g" id="bDone">完成</button><button class="r" id="bDel">刪除</button></div>
+</div>
+
+<div id="run" class="ov hid">
+ <div id="dist">x</div>
+ <div id="slots"><div class="slot" id="s0"></div><div class="slot" id="s1"></div><div class="slot" id="s2"></div></div>
+ <div id="info2" style="padding:6px 10px;font-size:13px;background:#1c1c1c"></div>
+ <div class="bar"><button class="s" id="bStop">停止</button></div>
+</div>
+
+<div id="keybox" class="ov hid">
+ <p>請輸入 Google Maps API Key</p><input id="key" placeholder="AIza..."><button id="bKey">儲存</button>
+</div>
+
+<script>
+const $=id=>document.getElementById(id), L=['','a','b','c'];
+let G=[],cur=null,map,me,circle,mk=[],form,lastGeo=null,running=false,first=true;
+/* ---- storage (IndexedDB) ---- */
+const dbp=new Promise(r=>{const q=indexedDB.open('geo',1);q.onupgradeneeded=()=>q.result.createObjectStore('s');q.onsuccess=()=>r(q.result)});
+const dget=async()=>{const d=await dbp;return new Promise(r=>{const q=d.transaction('s').objectStore('s').get('g');q.onsuccess=()=>r(q.result||[])})};
+const dset=async v=>{const d=await dbp;d.transaction('s','readwrite').objectStore('s').put(v,'g')};
+/* ---- helpers ---- */
+const dist=(a,b)=>{const R=6371000,t=x=>x*Math.PI/180,dl=t(b.lat-a.lat),dn=t(b.lng-a.lng);
+ const h=Math.sin(dl/2)**2+Math.cos(t(a.lat))*Math.cos(t(b.lat))*Math.sin(dn/2)**2;return 2*R*Math.asin(Math.sqrt(h))};
+const srt=()=>G.sort((a,b)=>String(a.no).localeCompare(String(b.no),undefined,{numeric:true}));
+const seq=()=>{const o=[];srt().forEach(g=>g.pts.forEach((p,i)=>{if(p&&p.lat!=null)o.push({...p,label:g.no+L[i],g:g,i})}));return o};
+const fmt=d=>d<1000?d.toFixed(1)+' m':(d/1000).toFixed(2)+' km';
+function geo(p){return new Promise(r=>{const f=()=>r(p.lat.toFixed(5)+','+p.lng.toFixed(5));
+ try{new google.maps.Geocoder().geocode({location:p},(x,s)=>r(s==='OK'&&x[0]?x[0].formatted_address.split(',').slice(0,2).join(','):f()))}catch(e){f()}})}
+function getPos(){return cur?Promise.resolve(cur):new Promise((ok,no)=>navigator.geolocation.getCurrentPosition(
+ p=>ok({lat:p.coords.latitude,lng:p.coords.longitude}),no,{enableHighAccuracy:true}))}
+function shrink(file){return new Promise(r=>{const im=new Image();im.onload=()=>{const k=Math.min(1,640/Math.max(im.width,im.height)),c=document.createElement('canvas');
+ c.width=im.width*k;c.height=im.height*k;c.getContext('2d').drawImage(im,0,0,c.width,c.height);r(c.toDataURL('image/jpeg',.65))};im.src=URL.createObjectURL(file)})}
+/* ---- map ---- */
+function initMap(){
+ map=new google.maps.Map($('map'),{center:{lat:22.3,lng:114.17},zoom:17,disableDefaultUI:true,zoomControl:true});
+ me=new google.maps.Marker({map,title:'我',icon:{path:google.maps.SymbolPath.CIRCLE,scale:8,fillColor:'#4285f4',fillOpacity:1,strokeColor:'#fff',strokeWeight:2}});
+ circle=new google.maps.Circle({map,radius:30,strokeColor:'#4285f4',fillColor:'#4285f4',fillOpacity:.12,strokeWeight:1});
+ if(cur)upd(cur);
+}
+function loadMaps(k){const s=document.createElement('script');s.src='https://maps.googleapis.com/maps/api/js?key='+encodeURIComponent(k)+'&callback=initMap';s.onerror=()=>$('info').textContent='Google Maps 載入失敗';document.head.appendChild(s)}
+window.initMap=initMap;
+function upd(p){
+ cur=p;
+ if(map){me.setPosition(p);circle.setCenter(p);
+  if(first&&!$('barMap').offsetParent){map.fitBounds(circle.getBounds());first=false}}
+ const t=p.lat.toFixed(6)+', '+p.lng.toFixed(6);
+ if(!lastGeo||dist(lastGeo,p)>15){lastGeo=p;geo(p).then(a=>{$('addr').textContent=a;})}
+ $('info').innerHTML='現在位置：<span id="addr">'+($('addr')?$('addr').textContent:'')+'</span><br>坐標：'+t;
+ $('info2').innerHTML='現在位置：'+($('addr').textContent)+'<br>坐標：'+t;
+ if(running)renderRun();
+}
+/* ---- run view ---- */
+function renderRun(){
+ const S=seq();if(!cur||!S.length){$('dist').textContent='x';[0,1,2].forEach(i=>$('s'+i).innerHTML='');$('s1').innerHTML='<div id="xx">x</div>';return}
+ S.forEach(s=>s.d=dist(cur,s));
+ const M=S.filter(s=>s.d<=6).sort((a,b)=>a.d-b.d).slice(0,3);
+ let nx=null;
+ if(M.length){nx=S[S.indexOf(S.find(s=>s.label===M[0].label))+1]||null}else nx=S.slice().sort((a,b)=>a.d-b.d)[0];
+ $('dist').textContent=nx?'→ '+nx.label+'：'+fmt(nx.d):'x';
+ for(let i=0;i<3;i++){const m=M[i];$('s'+i).innerHTML=m?(m.img?'<img src="'+m.img+'">':'')+'<span class="tag">'+m.label+'</span>':''}
+ if(!M.length)$('s1').innerHTML='<div id="xx">x</div>';
+}
+$('bStart').onclick=()=>{running=true;$('run').classList.remove('hid');renderRun()};
+$('bStop').onclick=()=>{running=false;$('run').classList.add('hid')};
+/* ---- map button ---- */
+$('bMap').onclick=()=>{
+ const g=srt();if(!cur||!g.length||!map){alert('未有資料或未定位');return}
+ const near=g.map(x=>({x,d:dist(cur,x.pts[0])})).sort((a,b)=>a.d-b.d)[0].x;
+ const nxt=g[g.indexOf(near)+1],b=new google.maps.LatLngBounds(cur);
+ mk.forEach(m=>m.setMap(null));mk=[];
+ [near,nxt].forEach((x,i)=>{if(!x)return;const p=x.pts[0];b.extend(p);
+  mk.push(new google.maps.Marker({map,position:p,label:{text:String(x.no),color:'#fff'},title:i?'下一個':'最近'}))});
+ map.fitBounds(b);
+ $('bar').classList.add('hid');$('barMap').classList.remove('hid');
+};
+$('bBack').onclick=()=>{mk.forEach(m=>m.setMap(null));mk=[];$('barMap').classList.add('hid');$('bar').classList.remove('hid');
+ if(cur&&map)map.fitBounds(circle.getBounds())};
+/* ---- input form ---- */
+const blank=()=>({no:'',pts:[{},{},{},{}]});
+function renderForm(){
+ let h='<div id="chips">'+srt().map(g=>'<span data-no="'+g.no+'">'+g.no+'</span>').join('')+'</div>'+
+ '<div style="font-size:13px;margin-bottom:4px">已存 '+G.length+' / 21 組（點號碼可修改）</div>'+
+ '<input id="no" placeholder="鐘位號碼" value="'+(form.no||'')+'">';
+ form.pts.forEach((p,i)=>{h+='<div class="row"><b>'+(i?'節點 '+(form.no||'')+L[i]:'鐘位坐標')+'</b>'+
+ '<input type="text" class="c" id="c'+i+'" placeholder="緯度,經度" value="'+(p.lat!=null?p.lat+','+p.lng:'')+'">'+
+ '<input type="text" class="c" id="n'+i+'" placeholder="地方名（可編輯）" value="'+(p.name||'')+'">'+
+ '<button data-here="'+i+'">現坐標</button><label class="up">相片<input type="file" accept="image/*" hidden data-img="'+i+'"></label>'+
+ '<img id="t'+i+'" src="'+(p.img||'')+'"></div>'});
+ $('form').innerHTML=h;
+}
+function readForm(){
+ form.no=$('no').value.trim();
+ form.pts.forEach((p,i)=>{const [a,b]=$('c'+i).value.split(',').map(parseFloat);
+  if(isFinite(a)&&isFinite(b)){p.lat=a;p.lng=b}else{p.lat=p.lng=undefined;delete p.lat;delete p.lng}
+  p.name=$('n'+i).value});
+}
+$('form').addEventListener('click',async e=>{
+ const h=e.target.dataset.here,n=e.target.dataset.no;
+ if(h!=null){try{const p=await getPos();$('c'+h).value=p.lat.toFixed(6)+','+p.lng.toFixed(6);$('n'+h).value=await geo(p)}catch(x){alert('未能取得位置')}}
+ if(n!=null){readForm();form=JSON.parse(JSON.stringify(G.find(g=>String(g.no)===n)));renderForm()}
+});
+$('form').addEventListener('change',async e=>{
+ const i=e.target.dataset.img;if(i==null||!e.target.files[0])return;
+ readForm();form.pts[i].img=await shrink(e.target.files[0]);$('t'+i).src=form.pts[i].img;
+});
+async function save(){
+ readForm();
+ if(!form.no){alert('請輸入鐘位號碼');return false}
+ if(form.pts[0].lat==null){alert('請輸入鐘位坐標');return false}
+ const k=G.findIndex(g=>String(g.no)===String(form.no));
+ if(k<0&&G.length>=21){alert('最多 21 組');return false}
+ const c=JSON.parse(JSON.stringify(form));if(k<0)G.push(c);else G[k]=c;
+ await dset(G);return true;
+}
+$('bIn').onclick=()=>{form=blank();renderForm();$('inp').classList.remove('hid')};
+$('bNext').onclick=async()=>{if(await save()){form=blank();renderForm()}};
+$('bDone').onclick=async()=>{readForm();if(form.no||form.pts[0].lat!=null){if(!await save())return}$('inp').classList.add('hid')};
+$('bDel').onclick=async()=>{if(confirm('清除所有已存資料？')){G=[];await dset(G);form=blank();renderForm()}};
+/* ---- start ---- */
+$('bKey').onclick=()=>{const k=$('key').value.trim();if(k){localStorage.gkey=k;$('keybox').classList.add('hid');loadMaps(k)}};
+(async()=>{
+ G=await dget();
+ const k=localStorage.gkey;if(k)loadMaps(k);else $('keybox').classList.remove('hid');
+ if(!navigator.geolocation){$('info').textContent='此裝置不支援定位';return}
+ navigator.geolocation.watchPosition(p=>upd({lat:p.coords.latitude,lng:p.coords.longitude}),
+  e=>$('info').textContent='定位失敗：'+e.message,{enableHighAccuracy:true,maximumAge:1000});
+})();
+</script></body></html>
